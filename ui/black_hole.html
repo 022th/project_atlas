@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Atlas Singularidade</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      background-color: #050711 !important;
+      background: #050711 !important;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    /* Região que permite arrastar a janela pela tela do Windows */
+    .drag-region {
+      -webkit-app-region: drag;
+    }
+
+    .no-drag {
+      -webkit-app-region: no-drag;
+    }
+
+    #container {
+      position: relative;
+      width: 280px;
+      height: 280px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background-color: #050711 !important;
+      background: #050711 !important;
+    }
+
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 280px;
+      height: 280px;
+      pointer-events: none;
+    }
+
+    /* Pílula de status sutil embaixo da orbe */
+    #status-pill {
+      position: absolute;
+      bottom: 8px;
+      padding: 3px 12px;
+      border-radius: 9999px;
+      font-size: 10px;
+      font-family: monospace;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      background: rgba(8, 14, 28, 0.88);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #38bdf8;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+    }
+  </style>
+</head>
+<body>
+  <div id="container" class="drag-region">
+    <canvas id="bhCanvas" width="280" height="280"></canvas>
+    <div id="status-pill" class="no-drag">ATLAS • IDLE</div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('bhCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusPill = document.getElementById('status-pill');
+
+    let mode = 'idle'; // 'idle', 'listening', 'thinking', 'speaking'
+    let time = 0;
+
+    const modeConfigs = {
+      idle: {
+        pillText: 'ATLAS • STANDBY',
+        pillBorder: 'rgba(56, 189, 248, 0.4)',
+        pillColor: '#38bdf8',
+        colorDisk: '56, 189, 248',    // Ciano suave
+        colorFront: '125, 211, 252',
+        colorLens: '14, 116, 144',
+        diskSpeed: 0.015,
+        horizonRadius: 44,
+        lensIntensity: 0.5
+      },
+      listening: {
+        pillText: 'OUVINDO...',
+        pillBorder: 'rgba(16, 185, 129, 0.6)',
+        pillColor: '#34d399',
+        colorDisk: '16, 185, 129',   // Verde esmeralda neon
+        colorFront: '52, 211, 153',
+        colorLens: '5, 150, 105',
+        diskSpeed: 0.035,
+        horizonRadius: 40,           // Absorvendo / contraindo
+        lensIntensity: 0.7
+      },
+      thinking: {
+        pillText: 'PENSANDO...',
+        pillBorder: 'rgba(168, 85, 247, 0.6)',
+        pillColor: '#c084fc',
+        colorDisk: '168, 85, 247',   // Roxo violeta
+        colorFront: '216, 180, 254',
+        colorLens: '126, 34, 206',
+        diskSpeed: 0.08,             // Rotação rápida
+        horizonRadius: 47,
+        lensIntensity: 0.9
+      },
+      speaking: {
+        pillText: 'FALANDO',
+        pillBorder: 'rgba(245, 158, 11, 0.6)',
+        pillColor: '#fbbf24',
+        colorDisk: '245, 158, 11',   // Âmbar solar intenso
+        colorFront: '254, 240, 138',
+        colorLens: '234, 88, 12',
+        diskSpeed: 0.045,
+        horizonRadius: 45,
+        lensIntensity: 1.0
+      }
+    };
+
+    // Partículas em órbita com profundidade Z
+    const NUM_PARTICLES = 130;
+    const particles = [];
+    for (let i = 0; i < NUM_PARTICLES; i++) {
+      particles.push({
+        dist: 48 + Math.random() * 85,
+        angle: Math.random() * Math.PI * 2,
+        speed: 0.012 + Math.random() * 0.03,
+        size: 0.7 + Math.random() * 2.0,
+        brightness: 0.3 + Math.random() * 0.7
+      });
+    }
+
+    // Função pública chamada pelo Python
+    window.setMode = function(newMode) {
+      if (!modeConfigs[newMode]) return;
+      mode = newMode;
+      const cfg = modeConfigs[mode];
+      statusPill.textContent = cfg.pillText;
+      statusPill.style.borderColor = cfg.pillBorder;
+      statusPill.style.color = cfg.pillColor;
+    };
+
+    window.setStatusText = function(text) {
+      statusPill.textContent = text;
+    };
+
+    function render() {
+      time += 0.035;
+      const cfg = modeConfigs[mode];
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const rH = cfg.horizonRadius;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 1. ONDAS SONORAS (Quando falando)
+      if (mode === 'speaking') {
+        for (let i = 0; i < 4; i++) {
+          const prog = (time * 1.4 + i * 0.25) % 1;
+          const r = rH + prog * 105;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${cfg.colorDisk}, ${0.75 * (1 - prog)})`;
+          ctx.lineWidth = 2.5 * (1 - prog);
+          ctx.stroke();
+        }
+      }
+
+      // 2. LENTE GRAVITACIONAL DE FUNDO (Halo Curvado)
+      ctx.save();
+      ctx.translate(cx, cy);
+
+      ctx.beginPath();
+      const lensDistort = (mode === 'thinking') ? Math.sin(time * 6) * 3 : 0;
+      ctx.ellipse(0, -8 + lensDistort, 84, 40, 0, Math.PI, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${cfg.colorLens}, ${0.5 * cfg.lensIntensity})`;
+      ctx.lineWidth = 5;
+      ctx.filter = 'blur(4px)';
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.ellipse(0, 8 - lensDistort, 84, 25, 0, 0, Math.PI);
+      ctx.strokeStyle = `rgba(${cfg.colorDisk}, ${0.35 * cfg.lensIntensity})`;
+      ctx.lineWidth = 3.5;
+      ctx.stroke();
+      ctx.restore();
+      ctx.filter = 'none';
+
+      // 3. PARTE DE TRÁS DO DISCO DE ACREÇÃO (Y < 0, Atrás da Esfera)
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-0.25);
+
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 110, 32, 0, Math.PI, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${cfg.colorDisk}, 0.55)`;
+      ctx.lineWidth = (mode === 'thinking') ? 8 : 5;
+      ctx.filter = 'blur(3px)';
+      ctx.stroke();
+      ctx.restore();
+      ctx.filter = 'none';
+
+      // Partículas de fundo (Z < 0)
+      particles.forEach((p) => {
+        p.angle += p.speed * (cfg.diskSpeed / 0.015);
+        if (mode === 'listening') {
+          p.dist -= 0.32;
+          if (p.dist < rH - 4) p.dist = 115;
+        }
+
+        const sinA = Math.sin(p.angle);
+        if (sinA < 0) {
+          const cosA = Math.cos(p.angle);
+          const x = cx + cosA * p.dist;
+          const y = cy + sinA * (p.dist * 0.30);
+
+          ctx.beginPath();
+          ctx.arc(x, y, p.size * 0.75, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${cfg.colorDisk}, ${p.brightness * 0.6})`;
+          ctx.fill();
+        }
+      });
+
+      // 4. ESFERA NEGRA CENTRAL (HORIZONTE DE EVENTOS)
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, rH, 0, Math.PI * 2);
+      ctx.fillStyle = '#020205';
+      ctx.fill();
+
+      // Anel de Fótons (Borda fina brilhante)
+      ctx.strokeStyle = `rgba(${cfg.colorFront}, 0.85)`;
+      ctx.lineWidth = (mode === 'thinking') ? 2.2 : 1.4;
+      ctx.shadowColor = `rgb(${cfg.colorDisk})`;
+      ctx.shadowBlur = 14;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.restore();
+
+      // Símbolo sutil central
+      ctx.fillStyle = `rgba(${cfg.colorFront}, 0.45)`;
+      ctx.font = 'bold 10px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('ATLAS', cx, cy);
+
+      // 5. PARTE DA FRENTE DO DISCO DE ACREÇÃO (Y > 0)
+      // PASSA DIRETAMENTE NA FRENTE DA ESFERA PRETA!
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-0.25);
+
+      const frontGrad = ctx.createLinearGradient(-120, 0, 120, 0);
+      frontGrad.addColorStop(0, `rgba(${cfg.colorDisk}, 0.05)`);
+      frontGrad.addColorStop(0.2, `rgba(${cfg.colorDisk}, 0.7)`);
+      frontGrad.addColorStop(0.5, `rgba(${cfg.colorFront}, 1.0)`);
+      frontGrad.addColorStop(0.8, `rgba(${cfg.colorDisk}, 0.7)`);
+      frontGrad.addColorStop(1, `rgba(${cfg.colorDisk}, 0.05)`);
+
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 110, 32, 0, 0, Math.PI);
+      ctx.strokeStyle = frontGrad;
+      ctx.lineWidth = (mode === 'speaking') ? 10 : (mode === 'thinking' ? 8 : 6);
+      ctx.shadowColor = `rgb(${cfg.colorFront})`;
+      ctx.shadowBlur = (mode === 'speaking') ? 20 : 12;
+      ctx.stroke();
+
+      // Linha incandescente central
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 107, 30, 0, 0, Math.PI);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.shadowBlur = 8;
+      ctx.stroke();
+      ctx.restore();
+      ctx.shadowBlur = 0;
+
+      // 6. PARTÍCULAS FRONTAIS (PASSAM NA FRENTE DO PRETO)
+      particles.forEach((p) => {
+        const sinA = Math.sin(p.angle);
+        if (sinA >= 0) {
+          const cosA = Math.cos(p.angle);
+          const rot = -0.25;
+          const rawX = cosA * p.dist;
+          const rawY = sinA * (p.dist * 0.30);
+          const x = cx + rawX * Math.cos(rot) - rawY * Math.sin(rot);
+          const y = cy + rawX * Math.sin(rot) + rawY * Math.cos(rot);
+
+          let finalSize = p.size;
+          if (mode === 'speaking') {
+            finalSize += Math.sin(time * 8 + p.angle * 4) * 1.3;
+          }
+
+          ctx.beginPath();
+          ctx.arc(x, y, Math.max(0.7, finalSize), 0, Math.PI * 2);
+          ctx.fillStyle = (p.brightness > 0.6) ? '#ffffff' : `rgba(${cfg.colorFront}, ${p.brightness})`;
+          ctx.shadowColor = `rgb(${cfg.colorDisk})`;
+          ctx.shadowBlur = 6;
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        }
+      });
+
+      requestAnimationFrame(render);
+    }
+
+    render();
+  </script>
+</body>
+</html>

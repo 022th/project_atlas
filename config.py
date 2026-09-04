@@ -51,9 +51,17 @@ CONFIGS_DIR = "configs"
 # Modelo de voz Whisper local:
 # "small"  = rápido (~2s), ~500MB RAM, boa precisão.
 # "medium" = mais preciso (~3-4s), ~1.5GB RAM, excelente para fala rápida/gírias.
-WHISPER_MODEL_SIZE = "medium"
+WHISPER_MODEL_SIZE = "small"
 
 # Configurações de Wake Word (Palavra de Ativação):
 # USE_WAKEWORD = True (ativa escuta viva por voz chamando "ATLAS")
 USE_WAKEWORD = True
 WAKEWORD_NAME = "Atlas"
+
+# Ferramentas do Sistema (v4):
+# Permite que a Atlas controle o PC (abrir apps, screenshot, volume, etc.)
+TOOLS_ENABLED = True
+
+# Interface Visual Desktop (v5):
+# Abre a orbe flutuante 3D (Buraco Negro) sempre visível no canto superior direito
+ENABLE_GUI = True

@@ -1,3 +1,7 @@
+"""
+Atlas v4 — Voice Input com detecção precisa de Wake Word 'ATLAS',
+resposta de voz imediata ('Sim?') e Silero VAD.
+"""
 import math
 import time
 import re
@@ -5,7 +9,6 @@ import numpy as np
 import sounddevice as sd
 from scipy.signal import resample_poly
 
-# Tenta importar dependências
 try:
     from faster_whisper import WhisperModel
     WHISPER_AVAILABLE = True
@@ -19,9 +22,14 @@ try:
 except ImportError:
     KEYBOARD_AVAILABLE = False
 
+# Variações fonéticas de Atlas que o Whisper pode reconhecer
+WAKE_VARIATIONS = {
+    "atlas", "atla", "atlá", "atras", "atrás", "atlass", "atletas", "atas", "alas", "actas"
+}
+
 
 class VoiceInput:
-    """Captura áudio do microfone via chamada 'ATLAS' ou Hotkey F8 e transcreve com Whisper local."""
+    """Captura áudio do microfone via chamada viva 'ATLAS' ou Hotkey F8 e transcreve com Whisper local."""
 
     def __init__(
         self,
@@ -29,13 +37,18 @@ class VoiceInput:
         hotkey="f8",
         use_wakeword=True,
         wakeword_name="Atlas",
+        vad=None,
+        voice_out=None,
+        gui=None,
     ):
         self.hotkey = hotkey
         self.target_samplerate = 16000  # Whisper requer 16kHz
         self.model = None
-        self.tiny_model = None
         self.use_wakeword = use_wakeword
         self.wakeword_name = wakeword_name.lower()
+        self.vad = vad  # SileroVAD instance
+        self.voice_out = voice_out  # VoiceOutput instance para resposta rápida ('Sim?')
+        self.gui = gui  # AtlasGUI instance para sincronização visual
         self.is_processing = False
         self._buffer = []
         self._is_recording = False
@@ -47,20 +60,10 @@ class VoiceInput:
         # Configura microfone padrão do Windows
         self._setup_default_device()
 
-        # Carrega Whisper principal (medium/small para transcrição perfeita)
+        # Carrega Whisper principal
         print(f"[voice] Carregando Whisper '{model_size}'... ", end="", flush=True)
         self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
         print("OK!")
-
-        # Carrega detector ultrarrápido para a palavra 'ATLAS'
-        if self.use_wakeword:
-            try:
-                print(f"[voice] Carregando detector de ativação 'ATLAS'... ", end="", flush=True)
-                self.tiny_model = WhisperModel("tiny", device="cpu", compute_type="int8")
-                print("OK!")
-            except Exception as e:
-                print(f"Erro: {e}")
-                self.use_wakeword = False
 
     def _setup_default_device(self):
         """Detecta a taxa nativa do microfone padrão do Windows."""
@@ -112,87 +115,113 @@ class VoiceInput:
         Método principal de entrada. Se use_wakeword estiver ativo, escuta pela chamada 'ATLAS'.
         Caso contrário (ou como fallback), escuta por F8.
         """
-        if self.use_wakeword and self.tiny_model:
+        if self.use_wakeword and self.vad and self.vad.available:
             return self._listen_atlas_wakeword()
         else:
             return self.record_on_hotkey()
 
     def _listen_atlas_wakeword(self):
-        """Escuta continuamente no microfone chamadas pelo nome 'ATLAS' (ou 'Ei Atlas' / 'Hey Atlas')."""
+        """
+        Escuta o microfone usando Silero VAD para capturar fala sem latência.
+        Ao detectar 'ATLAS', responde por voz ('Sim?') e depois grava a pergunta.
+        """
         if not self.available or self.is_processing:
             return None
 
-        print(f"\n🎤 Ouvindo... (Chame 'ATLAS' ou 'EI ATLAS', ou segure {self.hotkey.upper()})")
+        print(f"\n🎤 Ouvindo ativamente... (Diga 'ATLAS' ou 'EI ATLAS', ou segure {self.hotkey.upper()})")
 
-        sr = self.native_samplerate
-        chunk_duration = 1.2  # janela de 1.2s para detectar a palavra 'Atlas'
-        chunk_samples = int(sr * chunk_duration)
+        while not self.is_processing:
+            # Atalho manual F8 sempre funcional a qualquer momento
+            if KEYBOARD_AVAILABLE and keyboard.is_pressed(self.hotkey):
+                return self.record_on_hotkey()
 
-        try:
-            with sd.InputStream(device=None, samplerate=sr, channels=1, dtype="float32") as stream:
-                while not self.is_processing:
-                    # Atalho manual F8 sempre funcional
-                    if KEYBOARD_AVAILABLE and keyboard.is_pressed(self.hotkey):
-                        return self.record_on_hotkey()
+            # Silero VAD aguarda fala humana com pre-buffer (não corta início)
+            audio_16k = self.vad.listen_until_silence(
+                silence_s=0.45,
+                is_interrupted=lambda: self.is_processing or (KEYBOARD_AVAILABLE and keyboard.is_pressed(self.hotkey)),
+            )
 
-                    data, _ = stream.read(chunk_samples)
-                    audio_f32 = data.flatten()
+            if audio_16k is None or len(audio_16k) == 0:
+                time.sleep(0.01)
+                continue
 
-                    max_vol = np.max(np.abs(audio_f32))
+            # Transcreve com Whisper rápido com contexto prioritário para Atlas
+            audio_norm = self._normalize_audio(audio_16k)
+            try:
+                segments, _ = self.model.transcribe(
+                    audio_norm,
+                    language="pt",
+                    beam_size=1,
+                    vad_filter=False,
+                    initial_prompt="Atlas. Ei Atlas. Assistente Atlas.",
+                )
+                heard_text = " ".join(s.text for s in segments).strip()
+            except Exception:
+                continue
 
-                    # Só processa se houver voz/som no microfone
-                    if max_vol > 0.015:
-                        audio_16k = self._resample_audio(audio_f32, sr, self.target_samplerate)
-                        audio_norm = self._normalize_audio(audio_16k)
+            if not heard_text:
+                continue
 
-                        # Teste ultrarrápido com modelo tiny (50ms)
-                        segments, _ = self.tiny_model.transcribe(
-                            audio_norm,
-                            language="pt",
-                            beam_size=1,
-                            vad_filter=False,
-                            no_speech_threshold=0.5,
-                        )
-                        detected_text = " ".join(s.text for s in segments).strip().lower()
+            # Limpa pontuações para análise de palavras
+            clean_text = re.sub(r'[^\w\s]', '', heard_text.lower()).strip()
+            words = clean_text.split()
 
-                        # Verifica se 'atlas' ou variações fonéticas estão no texto
-                        if re.search(r'\b(atlas|atla|atlass|ei atlas|hey atlas)\b', detected_text):
-                            print(f"\n🔥 [WAKE WORD DETECTADA: ATLAS]")
+            # Procura por qualquer variação da palavra de ativação
+            wake_idx = -1
+            for idx, w in enumerate(words):
+                if w in WAKE_VARIATIONS:
+                    wake_idx = idx
+                    break
 
-                            # Checa se o usuário já fez a pergunta na mesma frase (ex: "Atlas que horas são?")
-                            match = re.search(r'\b(?:atlas|atla|atlass|ei atlas|hey atlas)\b\s*(.+)', detected_text)
-                            if match and len(match.group(1).split()) >= 2:
-                                question = match.group(1).strip()
-                                print(f"   🎉 Pergunta capturada na frase: \"{question}\"")
-                                return question
+            if wake_idx != -1:
+                print(f"\n🔥 [WAKE WORD DETECTADA: ATLAS]")
 
-                            # Caso só tenha dito "Atlas", grava a pergunta por 4 segundos
-                            print("   🔴 Gravando sua pergunta (4 segundos)... FALE AGORA!")
-                            question_audio = sd.rec(int(sr * 4.0), samplerate=sr, channels=1, dtype="float32")
-                            sd.wait()
-                            question_audio = question_audio.flatten()
+                # Caso 1: Usuário já fez a pergunta na mesma frase (ex: "Atlas que horas são?")
+                remaining_words = words[wake_idx + 1:]
+                if len(remaining_words) >= 2:
+                    if self.gui:
+                        self.gui.set_state("thinking")
+                    question = " ".join(remaining_words)
+                    print(f"   🎉 Pergunta capturada na frase: \"{question}\"")
+                    return question
 
-                            q_vol = np.max(np.abs(question_audio))
-                            if q_vol > 0.001:
-                                q_16k = self._resample_audio(question_audio, sr, self.target_samplerate)
-                                q_norm = self._normalize_audio(q_16k)
+                # Caso 2: Usuário chamou pelo nome "Atlas"!
+                # Atlas responde imediatamente com áudio ("Sim?")
+                if self.voice_out and self.voice_out.available:
+                    self.voice_out.acknowledge("Sim?")
+                else:
+                    print("\nAtlas: Sim?")
 
-                                print("   ⏳ Transcrevendo...", end="", flush=True)
-                                text = self._transcribe(q_norm)
-                                if text:
-                                    print(" OK!")
-                                    return text
-                                else:
-                                    print(" (não entendi, tente novamente)")
-                                    return None
-                            else:
-                                print(" (áudio zerado)")
-                                return None
+                # Só AGORA abre o microfone para o usuário falar a pergunta!
+                if self.gui:
+                    self.gui.set_state("listening")
+                print("   🔴 Pode falar sua pergunta...")
+                q_audio = self.vad.listen_until_silence(
+                    silence_s=0.45,
+                    is_interrupted=lambda: self.is_processing,
+                )
 
-                    time.sleep(0.02)
-        except Exception as e:
-            print(f"\n   [voice] Erro no Wake Word Atlas: {e}")
-            return None
+                if q_audio is not None and len(q_audio) > 0:
+                    if self.gui:
+                        self.gui.set_state("thinking")
+                    q_norm = self._normalize_audio(q_audio)
+                    print("   ⏳ Processando...", end="", flush=True)
+                    text = self._transcribe(q_norm)
+                    if text:
+                        print(" OK!")
+                        return text
+                    else:
+                        if self.gui:
+                            self.gui.set_state("idle")
+                        print(" (não entendi a pergunta)")
+                else:
+                    if self.gui:
+                        self.gui.set_state("idle")
+                    print(" (nenhuma pergunta detectada)")
+
+            time.sleep(0.01)
+
+        return None
 
     def record_on_hotkey(self):
         """Espera o usuário pressionar F8, grava via callback enquanto segurada, e transcreve."""
@@ -264,7 +293,7 @@ class VoiceInput:
             segments, info = self.model.transcribe(
                 audio,
                 language="pt",
-                beam_size=5,
+                beam_size=1,
                 vad_filter=False,
                 condition_on_previous_text=False,
                 initial_prompt="Conversa em português do Brasil com o assistente inteligente Atlas.",

@@ -1,10 +1,10 @@
 import os
 
 
-def build_system_prompt(configs_dir, checkpoint=None, recent_conversations=None):
+def build_system_prompt(configs_dir, checkpoint=None, recent_conversations=None, tools_enabled=False):
     """
     Monta o system prompt completo lendo os arquivos de config e injetando
-    checkpoint do projeto ativo + histórico recente.
+    checkpoint do projeto ativo + histórico recente + ferramentas disponíveis.
     """
     # Lê regras e personalidade dos arquivos editáveis
     regras = _read_config(os.path.join(configs_dir, "regras.txt"))
@@ -12,6 +12,12 @@ def build_system_prompt(configs_dir, checkpoint=None, recent_conversations=None)
 
     # Bloco base
     prompt = f"Você é Atlas, um assistente IA pessoal inteligente e direto.\n\n[REGRAS]\n{regras}\n\n[PERSONALIDADE]\n{personalidade}"
+
+    # Ferramentas disponíveis (v4)
+    if tools_enabled:
+        from tools import get_tools_prompt
+        tools_prompt = get_tools_prompt()
+        prompt += f"\n\n[FERRAMENTAS]\n{tools_prompt}"
 
     # Checkpoint do projeto ativo (se detectado)
     if checkpoint:

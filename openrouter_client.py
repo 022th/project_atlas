@@ -1,5 +1,6 @@
 import requests
 import re
+import json
 
 
 class OmniRouter:
@@ -100,6 +101,104 @@ class OmniRouter:
             return response
 
         return "❌ Todos os modelos falharam. Tente novamente em ~1 minuto."
+
+    def chat_stream(self, messages, max_tokens=500, temperature=0.7):
+        """
+        Streaming da IA: faz yield de frases completas conforme a IA gera tokens.
+        Permite que o TTS comece a falar na primeira frase (~0.8s de latência).
+
+        Yield: strings com frases completas (terminadas em . ! ? ou parágrafo)
+        """
+        user_msg = ""
+        for msg in reversed(messages):
+            if msg["role"] == "user":
+                user_msg = msg["content"]
+                break
+
+        category = self.classify(user_msg)
+        pool = self.pools[category]
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Caracteres que delimitam frases para o TTS
+        SENTENCE_ENDINGS = re.compile(r'(?<=[.!?])\s+|(?<=\n)\s*')
+
+        for model in pool + self.pool_fallback:
+            data = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+            try:
+                response = requests.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=data,
+                    timeout=30,
+                    stream=True,
+                )
+
+                if response.status_code == 429 or response.status_code >= 400:
+                    continue
+
+                buffer = ""
+                full_response = ""
+
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    line = line.decode("utf-8")
+                    if line.startswith("data: "):
+                        line = line[6:]
+                    if line == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(line)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        token = delta.get("content", "")
+                        if not token:
+                            continue
+
+                        buffer += token
+                        full_response += token
+
+                        # Emite frases quando encontrar pontuação de fim de frase
+                        # seguida de espaço ou nova linha
+                        parts = SENTENCE_ENDINGS.split(buffer)
+                        if len(parts) > 1:
+                            # Tudo exceto o último fragmento (incompleto) é emitido
+                            for sentence in parts[:-1]:
+                                sentence = sentence.strip()
+                                if sentence:
+                                    yield sentence
+                            buffer = parts[-1]
+
+                    except (json.JSONDecodeError, IndexError, KeyError):
+                        continue
+
+                # Emite qualquer texto restante no buffer
+                if buffer.strip():
+                    yield buffer.strip()
+
+                # Registra estatísticas
+                self.stats[category] += 1
+                return  # sucesso — para de tentar modelos
+
+            except requests.exceptions.Timeout:
+                continue
+            except requests.exceptions.ConnectionError:
+                continue
+            except Exception:
+                continue
+
+        # Todos falharam: fallback para não-streaming
+        result = self.chat(messages, max_tokens, temperature)
+        yield result
 
     def _try_pool(self, models, messages, max_tokens, temperature):
         """Tenta cada modelo da lista em ordem. Retorna a resposta ou None."""
